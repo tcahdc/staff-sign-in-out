@@ -1,10 +1,10 @@
 {
   "name": "Staff Sign In / Out",
-  "short_name": "SignIO",
+  "short_name": "Sign In/Out",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#f8fafc",
-  "theme_color": "#22c55e",
+  "theme_color": "#10b981",
   "icons": [
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" }
   ]

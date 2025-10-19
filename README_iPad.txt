@@ -1,11 +1,7 @@
-# iPad Setup Instructions
+How to update / refresh on iPad
+1) Replace files in GitHub → Commit.
+2) Safari sometimes keeps an old cache. This build bumps the service worker to v3, which forces an update automatically on next load. If you still see older UI, open the site, wait ~5s, then close the tab/app and reopen.
 
-1. Go to your GitHub repo > Settings > Pages.
-2. Set 'Source' to 'Deploy from a branch' and 'main / (root)'.
-3. Visit your published URL on iPad Safari.
-4. Tap 'Share → Add to Home Screen'.
-5. You now have an offline-capable sign-in/out PWA.
-
-✅ CSV syntax fix applied (.join("\n"))
-✅ Offline caching enabled
-✅ Ready for GitHub Pages hosting
+Admin
+- Use the “Admin login…” selector (CJ An / Emily). PIN prompt appears if the person has a PIN set.
+- Admin tools include: Set PIN (per staff), remove staff, settings toggles, Add backdated OUT, Sign everyone OUT (now), Today view, CSV & Audit CSV export.

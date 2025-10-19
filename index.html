@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Staff Sign In / Out</title>
-  <meta name="theme-color" content="#22c55e">
+  <meta name="theme-color" content="#10b981">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -14,11 +14,378 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body { -webkit-tap-highlight-color: transparent; }
+    button { touch-action: manipulation; }
+    input, select, textarea { font-size: 16px; }
+    @media print { header, footer, .no-print { display:none !important } main { padding:0 } table { font-size: 11px } }
+  </style>
 </head>
 <body class="antialiased bg-slate-50 text-slate-900">
   <div id="root"></div>
   <script>
-    document.getElementById('root').innerHTML = '<div class="p-8 text-center text-2xl font-semibold text-emerald-700">Sign In/Out App Ready (Offline PWA Enabled)</div>';
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(console.error);
+      });
+    }
+  </script>
+  <script>
+    const { useEffect, useMemo, useRef, useState } = React;
+
+    function App(){
+      // Helpers
+      const loadLS = (k, fb) => { try{ const v = localStorage.getItem(k); return v? JSON.parse(v): fb; }catch{ return fb; } };
+      const saveLS = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+      const migrateStaff = (s) => Array.isArray(s) && s.length ? (typeof s[0]==='string' ? s.map(n=>({name:n, pin:''})) : s.map(x=>({name:x.name, pin:x.pin||''}))) : [];
+
+      // State
+      const [staff, setStaff] = useState(()=> migrateStaff(loadLS('signio_staff', ['CJ An','Emily','Ebony','Charlotte','Reegan','Holly'])));
+      const [records, setRecords] = useState(()=> loadLS('signio_records', []));
+      const [audit, setAudit] = useState(()=> loadLS('signio_audit', []));
+      const [settings, setSettings] = useState(()=> loadLS('signio_settings', { timezone:'Australia/Sydney', show24h:true, compactRows:false, requirePIN:true, autoMidnightOut:true, requireEditReason:false }));
+      const [selected, setSelected] = useState('');
+      const [filter, setFilter] = useState('');
+      const adminOptions = ['CJ An','Emily'];
+      const [admin, setAdmin] = useState({enabled:false, by:''});
+      const [confirmClear, setConfirmClear] = useState(false);
+
+      useEffect(()=> saveLS('signio_staff', staff), [staff]);
+      useEffect(()=> saveLS('signio_records', records), [records]);
+      useEffect(()=> saveLS('signio_audit', audit), [audit]);
+      useEffect(()=> saveLS('signio_settings', settings), [settings]);
+
+      // Time
+      const dateFmt = useMemo(()=> new Intl.DateTimeFormat('en-CA', {timeZone:settings.timezone, year:'numeric', month:'2-digit', day:'2-digit'}), [settings.timezone]);
+      const fmt = useMemo(()=> new Intl.DateTimeFormat('en-AU', {timeZone:settings.timezone, year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:!settings.show24h}), [settings.timezone, settings.show24h]);
+      const formatTs = (ts)=> fmt.format(new Date(ts));
+      const dayKey = (ts)=> dateFmt.format(new Date(ts));
+      const todayKey = ()=> dayKey(Date.now());
+      const [lastDayKey, setLastDayKey] = useState(todayKey());
+
+      const visibleStaff = useMemo(()=> staff.filter(s=> s.name.toLowerCase().includes(filter.toLowerCase())), [staff, filter]);
+      const lastActionFor = (name)=> { for(let i=records.length-1;i>=0;i--){ if(records[i].name===name) return {action:records[i].action, ts:records[i].ts}; } return null; };
+      const currentlyIn = useMemo(()=> {
+        const map = new Map(); for(const r of records) map.set(r.name, r.action);
+        return staff.filter(s=> map.get(s.name)==='IN').map(s=>s.name).sort((a,b)=>a.localeCompare(b));
+      }, [records, staff]);
+
+      const addRecordInternal = (name, action, ts = Date.now()) => {
+        const rec = { id: crypto.randomUUID(), name, action, ts, tz: settings.timezone };
+        setRecords(r=> [...r, rec]);
+        return rec;
+      };
+
+      // Auto midnight OUT
+      useEffect(()=>{
+        const closeStale = (limit)=>{
+          const lastMap = new Map(); for(const r of records) lastMap.set(r.name, {action:r.action, ts:r.ts});
+          const actions = [];
+          for(const s of staff){
+            const la = lastMap.get(s.name);
+            if(!la) continue;
+            if(la.action==='IN'){
+              const dk = dayKey(la.ts);
+              const today = todayKey();
+              const isStale = dk !== today && (!limit || dk === limit);
+              if(isStale) actions.push(s.name);
+            }
+          }
+          if(actions.length){
+            const now = Date.now();
+            setRecords(r=> [...r, ...actions.map(n=>({id:crypto.randomUUID(), name:n, action:'OUT', ts:now, tz:settings.timezone}))]);
+            setAudit(a=> [...a, ...actions.map(n=>({id:crypto.randomUUID(), when:now, editor:'SYSTEM', type:'ADD_BACKDATED_OUT', targetName:n, reason:'Auto midnight sign-out'}))]);
+          }
+        };
+        if(settings.autoMidnightOut) closeStale();
+        const id = setInterval(()=>{
+          const tk = todayKey();
+          if(tk !== lastDayKey){
+            if(settings.autoMidnightOut) closeStale(lastDayKey);
+            setLastDayKey(tk);
+          }
+        }, 60000);
+        return ()=> clearInterval(id);
+      }, [records.length, settings.timezone, settings.autoMidnightOut, lastDayKey]);
+
+      // Core actions with simple PIN prompts
+      const promptPIN = (who) => window.prompt(`Enter PIN for ${who} (leave blank if none):`) || '';
+      const startSign = (name, action) => {
+        if(!name) return;
+        const prev = lastActionFor(name)?.action || null;
+        if(prev === action){ window.alert(`${name} is already ${action}.`); return; }
+        const st = staff.find(s=>s.name===name);
+        if(settings.requirePIN && (st?.pin||'').trim()){
+          const entered = promptPIN(name);
+          if(entered !== st.pin){ window.alert('Incorrect PIN'); return; }
+        }
+        addRecordInternal(name, action);
+      };
+
+      const adminLogin = (name) => {
+        if(!name) return;
+        const st = staff.find(s=>s.name===name);
+        const required = (st?.pin||'').trim().length>0;
+        const entered = required ? promptPIN(name) : '';
+        if(required && entered !== st.pin){ window.alert('Incorrect PIN'); return; }
+        setAdmin({enabled:true, by:name});
+      };
+
+      const addStaff = (name) => {
+        const clean = (name||'').trim(); if(!clean) return;
+        if(staff.some(s=>s.name===clean)){ window.alert('That name already exists.'); return; }
+        setStaff(s=> [...s, {name:clean, pin:''}].sort((a,b)=>a.name.localeCompare(b.name)));
+      };
+      const setPIN = (name) => {
+        const st = staff.find(s=>s.name===name);
+        const val = window.prompt(`Set PIN for ${name} (leave blank to clear):`, st?.pin || '');
+        if(val===null) return;
+        setStaff(arr => arr.map(x=> x.name===name ? {...x, pin: (val||'').trim()} : x));
+      };
+      const removeStaff = (name) => {
+        if(!window.confirm(`Remove ${name}? This won’t delete past records.`)) return;
+        setStaff(s=> s.filter(x=>x.name!==name));
+        if(selected===name) setSelected('');
+      };
+
+      // Admin edits
+      const saveEdit = (recId) => {
+        const rec = records.find(r=>r.id===recId); if(!rec) return;
+        const newAction = window.prompt('Action (IN or OUT):', rec.action) || rec.action;
+        const newIso = window.prompt('ISO date/time (YYYY-MM-DDTHH:mm, local):', new Date(rec.ts).toISOString().slice(0,16)) || new Date(rec.ts).toISOString().slice(0,16);
+        const ts = new Date(newIso).getTime(); if(isNaN(ts)){ window.alert('Invalid date/time'); return; }
+        let reason = '';
+        if(settings.requireEditReason){
+          reason = window.prompt('Reason for edit:','') || '';
+          if(!reason.trim()){ window.alert('Reason is required'); return; }
+        }
+        const old = {...rec};
+        setRecords(r=> r.map(x=> x.id===recId ? {...x, action:newAction==='OUT'?'OUT':'IN', ts} : x));
+        setAudit(a=> [...a, {id:crypto.randomUUID(), when:Date.now(), editor:admin.by, type:'EDIT', recordId:recId, targetName:rec.name, reason, oldTs:old.ts, newTs:ts, oldAction:old.action, newAction:newAction==='OUT'?'OUT':'IN'}]);
+      };
+
+      const addBackdatedOut = () => {
+        const name = window.prompt('Backdate OUT for who (exact name)?','') || '';
+        if(!name) return;
+        const dt = window.prompt('Enter date/time (YYYY-MM-DDTHH:mm, local):','') || '';
+        const ts = new Date(dt).getTime(); if(isNaN(ts)){ window.alert('Invalid date/time'); return; }
+        let reason='';
+        if(settings.requireEditReason){
+          reason = window.prompt('Reason for backdated OUT:','') || '';
+          if(!reason.trim()){ window.alert('Reason is required'); return; }
+        }
+        addRecordInternal(name, 'OUT', ts);
+        setAudit(a=> [...a, {id:crypto.randomUUID(), when:Date.now(), editor:admin.by, type:'ADD_BACKDATED_OUT', targetName:name, reason}]);
+      };
+
+      const bulkOut = () => {
+        const inSet = new Set(currentlyIn);
+        if(inSet.size===0){ window.alert('No one is currently IN.'); return; }
+        if(!window.confirm(`Sign OUT ${inSet.size} staff now?`)) return;
+        const now = Date.now();
+        const newRecs = [...inSet].map(n=>({id:crypto.randomUUID(), name:n, action:'OUT', ts:now, tz:settings.timezone}));
+        setRecords(r=> [...r, ...newRecs]);
+        setAudit(a=> [...a, {id:crypto.randomUUID(), when:now, editor:admin.by, type:'BULK_OUT', reason:'End-of-day bulk sign-out'}]);
+      };
+
+      // CSV export
+      function csvSafe(s){ const q='"'; if(s==null) return ''; const str=String(s); if(/[",\n]/.test(str)) return q+str.replaceAll('"','""')+q; return str; }
+      function dateFileSafe(d){ const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
+      function downloadBlob(blob, filename){ const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; a.click(); URL.revokeObjectURL(url); }
+      const exportCSV = () => {
+        const header = ['ID','Name','Action','Timestamp','LocalTime ('+settings.timezone+')'].join(',');
+        const lines = records.map(r=> [r.id,csvSafe(r.name),r.action,new Date(r.ts).toISOString(),csvSafe(formatTs(r.ts))].join(','));
+        const csv = [header, ...lines].join('\n');
+        downloadBlob(new Blob([csv],{type:'text/csv;charset=utf-8;'}), `signio_records_${dateFileSafe(new Date())}.csv`);
+      };
+      const exportAuditCSV = () => {
+        const header = ['AuditID','WhenISO','Editor','Type','RecordID','TargetName','OldAction','NewAction','OldTsISO','NewTsISO','Reason'].join(',');
+        const lines = audit.map(a=> [a.id,new Date(a.when).toISOString(),csvSafe(a.editor),a.type,a.recordId||'',csvSafe(a.targetName||''),a.oldAction||'',a.newAction||'',a.oldTs?new Date(a.oldTs).toISOString():'',a.newTs?new Date(a.newTs).toISOString():'',csvSafe(a.reason||'')].join(','));
+        const csv = [header, ...lines].join('\n');
+        downloadBlob(new Blob([csv],{type:'text/csv;charset=utf-8;'}), `signio_audit_${dateFileSafe(new Date())}.csv`);
+      };
+
+      const clearAll = () => { if(!confirmClear){ setConfirmClear(true); return; } setRecords([]); setAudit([]); setConfirmClear(false); };
+
+      // Today view
+      const todayTotals = useMemo(()=>{
+        const key = todayKey();
+        const todays = records.filter(r=> dayKey(r.ts)===key);
+        const by = new Map(); for(const s of staff) by.set(s.name, []);
+        for(const r of todays) by.get(r.name)?.push(r);
+        const res = [];
+        const endNow = Date.now();
+        for(const [name, recs] of by){
+          recs.sort((a,b)=>a.ts-b.ts);
+          let ms=0;
+          for(let i=0;i<recs.length;i++){
+            if(recs[i].action==='IN'){
+              const out = recs.slice(i+1).find(x=>x.action==='OUT');
+              const outTs = out? out.ts : endNow;
+              ms += Math.max(0, outTs - recs[i].ts);
+            }
+          }
+          if(ms>0) res.push({name, hours:+(ms/3600000).toFixed(2)});
+        }
+        return res.sort((a,b)=>a.name.localeCompare(b.name));
+      }, [records, staff, settings.timezone]);
+
+      // UI
+      const el = React.createElement;
+      const nameInputRef = useRef(null);
+      const [newName, setNewName] = useState('');
+
+      return el('div', {className:'min-h-screen w-full bg-slate-50 text-slate-900 touch-manipulation'},
+        // Header
+        el('header', {className:'sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-slate-200 px-4 py-3 flex items-center justify-between'},
+          el('div', {className:'flex items-center gap-3'},
+            el('span', {className:'inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-600 font-bold select-none'}, 'IO'),
+            el('h1', {className:'text-xl font-semibold'}, 'Staff Sign In / Out'),
+            el('span', {className:'ml-2 text-sm text-slate-500'}, settings.timezone)
+          ),
+          el('div', {className:'flex items-center gap-2'},
+            admin.enabled ? [
+              el('span', {key:'adm', className:'text-xs text-emerald-700 bg-emerald-100 rounded-full px-2 py-1 select-none'}, `Admin: ${admin.by}`),
+              el('button', {key:'exit', onClick:()=>setAdmin({enabled:false, by:''}), className:'rounded-xl px-3 py-2 text-sm border'}, 'Exit Admin')
+            ] : el('select', {onChange:(e)=> adminLogin(e.target.value), defaultValue:'', className:'rounded-xl border px-2 py-2 text-sm'},
+                el('option', {value:'', disabled:true}, 'Admin login…'),
+                ...adminOptions.map(n=> el('option', {key:n, value:n}, n))
+            ),
+            el('button', {onClick: exportCSV, className:'rounded-xl px-3 py-2 text-sm bg-slate-900 text-white hover:bg-slate-800'}, 'Export CSV'),
+            el('button', {onClick: exportAuditCSV, className:'rounded-xl px-3 py-2 text-sm border'}, 'Export Audit'),
+            el('button', {onClick: ()=> setSettings(s=>({...s, compactRows: !s.compactRows})), className:'rounded-xl px-3 py-2 text-sm border'}, settings.compactRows? 'Comfortable rows':'Compact rows'),
+            el('button', {onClick: ()=> setSettings(s=>({...s, show24h: !s.show24h})), className:'rounded-xl px-3 py-2 text-sm border'}, settings.show24h? '12‑hour':'24‑hour'),
+            el('button', {onClick: ()=> window.print(), className:'rounded-2xl px-3 py-2 text-sm border'}, 'Print')
+          )
+        ),
+        // Main
+        el('main', {className:'mx-auto max-w-6xl p-4 grid lg:grid-cols-3 gap-6'},
+          // Left
+          el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-2'},
+            el('h2', {className:'text-lg font-semibold mb-3 select-none'}, 'Kiosk'),
+            el('div', {className:'flex gap-2 mb-3'},
+              el('input', {value:filter, onChange:e=>setFilter(e.target.value), placeholder:'Search staff', className:'w-full rounded-xl border px-3 py-3 text-base'}),
+              el('button', {onClick:()=>setFilter(''), className:'rounded-xl border px-3 text-base'}, 'Clear')
+            ),
+            el('div', {className:'grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 mb-4'},
+              ...visibleStaff.map(s=> el('button', {key:s.name, onClick:()=>setSelected(s.name), className:`rounded-2xl px-4 py-4 border text-left hover:border-emerald-400 hover:bg-emerald-50 text-base ${selected===s.name?'border-emerald-500 bg-emerald-50':''}`},
+                el('div', {className:'font-medium'}, s.name),
+                el('div', {className:'text-xs text-slate-500'}, `Last: ${lastActionFor(s.name)?.action ?? '—'}`)
+              ))
+            ),
+            el('div', {className:'rounded-2xl border p-4 flex flex-col md:flex-row items-center gap-3 select-none'},
+              el('div', {className:'flex-1'},
+                el('div', {className:'text-sm text-slate-500'}, 'Selected'),
+                el('div', {className:'text-xl font-semibold'}, selected || '—')
+              ),
+              el('div', {className:'flex gap-3'},
+                el('button', {disabled:!selected, onClick:()=>startSign(selected,'IN'), className:'rounded-2xl px-8 py-4 bg-emerald-600 text-white disabled:opacity-40 hover:bg-emerald-700 text-lg font-semibold'}, 'Sign In'),
+                el('button', {disabled:!selected, onClick:()=>startSign(selected,'OUT'), className:'rounded-2xl px-8 py-4 bg-slate-900 text-white disabled:opacity-40 hover:bg-slate-800 text-lg font-semibold'}, 'Sign Out')
+              )
+            )
+          ),
+          // Right
+          el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-1'},
+            el('h2', {className:'text-lg font-semibold mb-3 select-none'}, 'Staff & Settings'),
+            el('div', {className:'flex flex-col gap-3 mb-4'},
+              el('div', {className:'flex gap-2'},
+                el('input', {ref:(r)=>nameInputRef.current=r, value:newName, onChange:e=>setNewName(e.target.value), placeholder:'Add staff name', className:'flex-1 rounded-xl border px-3 py-3 text-base'}),
+                el('button', {onClick:()=>{addStaff(newName); setNewName(''); if(nameInputRef.current) nameInputRef.current.focus();}, className:'rounded-xl px-3 py-3 bg-slate-900 text-white hover:bg-slate-800 text-base'}, 'Add')
+              ),
+              el('div', {className:'flex flex-col gap-2 max-h-52 overflow-auto pr-1'},
+                ...staff.map(s=> el('div', {key:s.name, className:'flex items-center justify-between gap-2 px-3 py-2 rounded-2xl border'},
+                  el('div', null,
+                    el('div', {className:'font-medium'}, s.name),
+                    el('div', {className:'text-xs text-slate-500'}, `PIN: ${s.pin ? '••••' : 'not set'}`)
+                  ),
+                  admin.enabled && el('div', {className:'flex items-center gap-2'},
+                    el('button', {onClick:()=>setPIN(s.name), className:'rounded-xl px-2 py-2 text-xs border'}, 'Set PIN'),
+                    el('button', {onClick:()=>removeStaff(s.name), className:'text-xs text-red-600 hover:underline'}, 'remove')
+                  )
+                ))
+              ),
+              admin.enabled && [
+                el('div', {key:'tz', className:'flex items-center gap-2'},
+                  el('label', {className:'text-sm text-slate-600'}, 'Timezone'),
+                  el('select', {value:settings.timezone, onChange:e=>setSettings(s=>({...s, timezone:e.target.value})), className:'rounded-xl border px-3 py-2'},
+                    el('option', null, 'Australia/Sydney'),
+                    el('option', null, 'Australia/Brisbane'),
+                    el('option', null, 'Australia/Melbourne'),
+                    el('option', null, 'Australia/Perth'),
+                    el('option', null, 'Australia/Adelaide')
+                  )
+                ),
+                el('div', {key:'tog', className:'flex items-center gap-3'},
+                  el('label', {className:'text-sm text-slate-600 flex items-center gap-2 select-none'},
+                    el('input', {type:'checkbox', checked:settings.autoMidnightOut, onChange:e=>setSettings(s=>({...s, autoMidnightOut:e.target.checked}))}),
+                    'Auto sign‑out at midnight'
+                  ),
+                  el('label', {className:'text-sm text-slate-600 flex items-center gap-2 select-none'},
+                    el('input', {type:'checkbox', checked:settings.requireEditReason, onChange:e=>setSettings(s=>({...s, requireEditReason:e.target.checked}))}),
+                    'Require reason for edits'
+                  )
+                ),
+                el('div', {key:'admtools', className:'rounded-2xl border p-3 bg-amber-50'},
+                  el('div', {className:'font-medium mb-2'}, 'Admin tools'),
+                  el('div', {className:'flex gap-2 flex-wrap'},
+                    el('button', {onClick:addBackdatedOut, className:'rounded-xl bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700'}, 'Add backdated OUT'),
+                    el('button', {onClick:bulkOut, className:'rounded-xl bg-slate-900 text-white px-3 py-2 hover:bg-slate-800'}, 'Sign everyone OUT (now)')
+                  )
+                ),
+                el('div', {key:'clear', className:'flex items-center gap-2 mt-2'},
+                  el('button', {onClick:clearAll, className:`rounded-xl px-3 py-2 border ${confirmClear?'border-red-500 text-red-600':''}`}, confirmClear? 'Click again to confirm – Clear ALL records' : 'Clear ALL records')
+                )
+              ],
+              el('h3', {className:'text-base font-semibold mb-2 select-none'}, 'Currently IN'),
+              el('div', {className:'rounded-2xl border p-3 min-h-[3rem] bg-slate-50'},
+                currentlyIn.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No one is signed in.')
+                : el('ul', {className:'text-sm flex flex-wrap gap-2'}, ...currentlyIn.map(n=> el('li', {key:n, className:'inline-flex items-center px-2 py-1 rounded-xl bg-emerald-100 text-emerald-700'}, n)))
+              ),
+              el('h3', {className:'text-base font-semibold mt-3 mb-2 select-none'}, 'Today view (hours)'),
+              el('div', {className:'rounded-2xl border p-3 bg-slate-50'},
+                todayTotals.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No hours to show yet.')
+                : el('table', {className:'w-full text-sm'},
+                    el('thead', {className:'bg-slate-100'},
+                      el('tr', null, el('th', {className:'text-left px-2 py-1'}, 'Name'), el('th', {className:'text-left px-2 py-1'}, 'Hours today'))
+                    ),
+                    el('tbody', null, ...todayTotals.map(t=> el('tr', {key:t.name, className:'border-t'},
+                      el('td', {className:'px-2 py-1'}, t.name),
+                      el('td', {className:'px-2 py-1'}, t.hours.toFixed(2))
+                    )))
+                )
+              )
+            )
+          )
+        ),
+        // Records table
+        el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-3'},
+          el('h3', {className:'text-base font-semibold mb-2 select-none'}, 'Recent Activity'),
+          el('div', {className:'overflow-auto border rounded-2xl'},
+            el('table', {className:'w-full text-sm'},
+              el('thead', {className:'bg-slate-50'},
+                el('tr', {className:'text-left'},
+                  el('th', {className:'px-3 py-2'}, 'When'),
+                  el('th', {className:'px-3 py-2'}, 'Name'),
+                  el('th', {className:'px-3 py-2'}, 'Action'),
+                  el('th', {className:'px-3 py-2 w-24'}, admin.enabled ? 'Edit' : '')
+                )
+              ),
+              el('tbody', {className: settings.compactRows? '' : 'text-[0.95rem]'},
+                ...[...records].reverse().slice(0,500).map(r=> el('tr', {key:r.id, className:'border-t'},
+                  el('td', {className:'px-3 py-2 whitespace-nowrap'}, formatTs(r.ts)),
+                  el('td', {className:'px-3 py-2'}, r.name),
+                  el('td', {className:'px-3 py-2'}, el('span', {className:`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${r.action==='IN'?'bg-emerald-100 text-emerald-700':'bg-slate-200 text-slate-800'}`}, r.action)),
+                  el('td', {className:'px-3 py-2'}, admin.enabled && el('button', {onClick:()=>saveEdit(r.id), className:'rounded-xl border px-2 py-1 text-xs'}, 'Edit'))
+                )),
+                records.length===0 && el('tr', null, el('td', {className:'px-3 py-4 text-slate-500', colSpan:4}, 'No records yet. Select a staff member and tap Sign In / Sign Out.'))
+              )
+            )
+          )
+        )
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
   </script>
 </body>
 </html>
