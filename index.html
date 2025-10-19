@@ -17,7 +17,6 @@
       try {
         if (!window.crypto) window.crypto = window.msCrypto || {};
         if (!('getRandomValues' in crypto)) {
-          // Very old browsers won't support this app well, but avoid crash
           crypto.getRandomValues = function (arr) {
             for (var i=0;i<arr.length;i++) arr[i] = Math.floor(Math.random()*256);
             return arr;
@@ -27,8 +26,8 @@
           crypto.randomUUID = function () {
             var bytes = new Uint8Array(16);
             crypto.getRandomValues(bytes);
-            bytes[6] = (bytes[6] & 0x0f) | 0x40; // version
-            bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
             var toHex = function(b){ return ('0' + b.toString(16)).slice(-2); };
             var s = Array.from(bytes, toHex).join('');
             return s.slice(0,8)+'-'+s.slice(8,12)+'-'+s.slice(12,16)+'-'+s.slice(16,20)+'-'+s.slice(20);
@@ -46,7 +45,7 @@
     input, select, textarea { font-size: 16px; }
     @media print {
       header, footer, .no-print, .hide-on-print { display:none !important }
-      #printable-report { display:block !important }
+      #printable-report, #printable-individual { display:block !important }
       table { font-size: 11px }
       body { background: white }
     }
@@ -56,11 +55,10 @@
   <div id="root"></div>
   <div id="err" class="hidden fixed top-2 left-1/2 -translate-x-1/2 bg-red-600 text-white text-sm px-3 py-2 rounded-xl shadow"></div>
   <script>
-    // Visible error if something breaks so it's not a blank page
     window.onerror = function(msg, src, line, col, err){
       try {
         var el = document.getElementById('err');
-        el.textContent = 'Error: ' + msg + (err && err.stack ? ' — ' + err.stack : '');
+        el.textContent = 'Error: ' + msg;
         el.classList.remove('hidden');
       } catch(e){}
       return false;
@@ -77,13 +75,16 @@
     const { useEffect, useMemo, useRef, useState } = React;
 
     function App(){
+      // --- Storage helpers ---
       const loadLS = (k, fb) => { try{ const v = localStorage.getItem(k); return v? JSON.parse(v): fb; }catch{ return fb; } };
       const saveLS = (k, v) => localStorage.setItem(k, JSON.stringify(v));
       const migrateStaff = (s) => Array.isArray(s) && s.length ? (typeof s[0]==='string' ? s.map(n=>({name:n, pin:''})) : s.map(x=>({name:x.name, pin:x.pin||''}))) : [];
 
+      // --- State ---
       const [staff, setStaff] = useState(()=> migrateStaff(loadLS('signio_staff', ['CJ An','Emily','Ebony','Charlotte','Reegan','Holly'])));
       const [records, setRecords] = useState(()=> loadLS('signio_records', []));
       const [audit, setAudit] = useState(()=> loadLS('signio_audit', []));
+      const [overrides, setOverrides] = useState(()=> loadLS('signio_overrides', {})); // key: `${name}|YYYY-MM-DD` -> hours number
       const [settings, setSettings] = useState(()=> loadLS('signio_settings', { timezone:'Australia/Sydney', show24h:true, compactRows:false, requirePIN:true, autoMidnightOut:true, requireEditReason:false }));
       const [selected, setSelected] = useState('');
       const [filter, setFilter] = useState('');
@@ -97,21 +98,28 @@
       const [rangeEnd, setRangeEnd] = useState(()=> todayLocalISO());
       const [report, setReport] = useState({ rows: [], perDay: [], start: '', end: '' });
 
+      // Individual detail report
+      const [person, setPerson] = useState('');
+      const [indivRows, setIndivRows] = useState([]);
+      const [indivTotal, setIndivTotal] = useState(0);
+
       useEffect(()=> saveLS('signio_staff', staff), [staff]);
       useEffect(()=> saveLS('signio_records', records), [records]);
       useEffect(()=> saveLS('signio_audit', audit), [audit]);
       useEffect(()=> saveLS('signio_settings', settings), [settings]);
+      useEffect(()=> saveLS('signio_overrides', overrides), [overrides]);
 
+      // --- Time helpers ---
       const dateFmt = useMemo(()=> new Intl.DateTimeFormat('en-CA', {timeZone:settings.timezone, year:'numeric', month:'2-digit', day:'2-digit'}), [settings.timezone]);
       const fmt = useMemo(()=> new Intl.DateTimeFormat('en-AU', {timeZone:settings.timezone, year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:!settings.show24h}), [settings.timezone, settings.show24h]);
       const formatTs = (ts)=> fmt.format(new Date(ts));
       const dayKey = (ts)=> dateFmt.format(new Date(ts));
       const todayKey = ()=> dayKey(Date.now());
       const [lastDayKey, setLastDayKey] = useState(todayKey());
-
       function localEndOfDay(ts){ const d = new Date(ts); d.setHours(23,59,59,999); return d.getTime(); }
       function todayLocalISO(){ const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0,10); }
 
+      // --- Derived ---
       const visibleStaff = useMemo(()=> staff.filter(s=> s.name.toLowerCase().includes(filter.toLowerCase())), [staff, filter]);
       const lastActionFor = (name)=> { for(let i=records.length-1;i>=0;i--){ if(records[i].name===name) return {action:records[i].action, ts:records[i].ts}; } return null; };
       const currentlyIn = useMemo(()=> {
@@ -119,6 +127,7 @@
         return staff.filter(s=> map.get(s.name)==='IN').map(s=>s.name).sort((a,b)=>a.localeCompare(b));
       }, [records, staff]);
 
+      // --- Actions ---
       const addRecordInternal = (name, action, ts = Date.now()) => {
         const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now())+'_'+Math.random();
         const rec = { id, name, action, ts, tz: settings.timezone };
@@ -126,7 +135,7 @@
         return rec;
       };
 
-      // Auto midnight OUT (defensive)
+      // Auto midnight OUT
       useEffect(()=>{
         try{
           const closeStale = (limit)=>{
@@ -229,19 +238,10 @@
         setAudit(a=> [...a, {id:(crypto.randomUUID?crypto.randomUUID():String(Date.now())+'_'+Math.random()), when:Date.now(), editor:admin.by, type:'ADD_BACKDATED_OUT', targetName:name, reason}]);
       };
 
-      const bulkOut = () => {
-        const inSet = new Set(currentlyIn);
-        if(inSet.size===0){ window.alert('No one is currently IN.'); return; }
-        if(!window.confirm('Sign OUT '+inSet.size+' staff now?')) return;
-        const now = Date.now();
-        const newRecs = [...inSet].map(n=>({id:(crypto.randomUUID?crypto.randomUUID():String(now)+'_'+Math.random()), name:n, action:'OUT', ts:now, tz:settings.timezone}));
-        setRecords(r=> [...r, ...newRecs]);
-        setAudit(a=> [...a, {id:(crypto.randomUUID?crypto.randomUUID():String(now)+'_'+Math.random()), when:now, editor:admin.by, type:'BULK_OUT', reason:'End-of-day bulk sign-out'}]);
-      };
-
       function csvSafe(s){ const q='"'; if(s==null) return ''; const str=String(s); if(/[",\n]/.test(str)) return q+str.replace(/"/g,'""')+q; return str; }
       function dateFileSafe(d){ const p=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); }
       function downloadBlob(blob, filename){ try{ const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; a.click(); URL.revokeObjectURL(url); }catch(e){ console.error(e); } }
+
       const exportCSV = () => {
         const header = ['ID','Name','Action','Timestamp','LocalTime ('+settings.timezone+')'].join(',');
         const lines = records.map(r=> [r.id,csvSafe(r.name),r.action,new Date(r.ts).toISOString(),csvSafe(formatTs(r.ts))].join(','));
@@ -257,7 +257,7 @@
 
       const clearAll = () => { if(!confirmClear){ setConfirmClear(true); return; } setRecords([]); setAudit([]); setConfirmClear(false); };
 
-      // Build IN/OUT intervals per person
+      // Intervals
       function buildIntervalsByPerson(recs){
         const by = new Map(); for(const s of staff) by.set(s.name, []);
         const sorted = [...recs].sort((a,b)=> a.ts-b.ts);
@@ -284,7 +284,7 @@
         return Math.max(0, end - start);
       }
 
-      // Daily totals (per person) for chosen date
+      // --- Daily totals (per person) ---
       const dailyTotals = useMemo(()=>{
         if(!dailyDate) return [];
         const start = new Date(dailyDate); start.setHours(0,0,0,0);
@@ -292,14 +292,28 @@
         const intervals = buildIntervalsByPerson(records);
         const rows = [];
         for(const [name,segs] of intervals.entries()){
-          var ms = 0;
-          for(const seg of segs){ ms += overlapMs(seg[0], seg[1], start.getTime(), end.getTime()); }
-          if(ms>0) rows.push({name, hours:+(ms/3600000).toFixed(2)});
+          let ms = 0;
+          for(const [a,b] of segs) ms += overlapMs(a,b,start.getTime(),end.getTime());
+          const key = name+'|'+dateFmt.format(start);
+          if(overrides[key]!=null && overrides[key] !== ''){
+            rows.push({name, hours:+(+overrides[key]).toFixed(2), overridden:true});
+          } else if(ms>0) {
+            rows.push({name, hours:+(ms/3600000).toFixed(2), overridden:false});
+          }
         }
         return rows.sort((a,b)=> a.name.localeCompare(b.name));
-      }, [dailyDate, records, staff]);
+      }, [dailyDate, records, staff, overrides]);
 
-      // Range report (per person) + per-day breakdown
+      function setOverride(name, dateISO, hours){
+        const k = name+'|'+dateISO;
+        const val = (hours===''? '' : +(+hours).toFixed(2));
+        const next = {...overrides, [k]: val};
+        if(val==='' || isNaN(val)) delete next[k];
+        setOverrides(next);
+        setAudit(a=> [...a, {id:(crypto.randomUUID?crypto.randomUUID():String(Date.now())+'_'+Math.random()), when:Date.now(), editor:admin.by||'ADMIN', type:'SET_DAILY_OVERRIDE', targetName:name, reason:'Manual daily hours override', newTs:undefined, oldTs:undefined}]);
+      }
+
+      // --- Range report (per person) + per-day breakdown ---
       function generateRangeReport(){
         if(!rangeStart || !rangeEnd){ setReport({rows:[], perDay:[], start:'', end:''}); return; }
         const s = new Date(rangeStart); s.setHours(0,0,0,0);
@@ -307,29 +321,112 @@
         const start = s.getTime(), end = e.getTime();
         const intervals = buildIntervalsByPerson(records);
         const rows = [];
-        for(const [name, segs] of intervals.entries()){
-          var ms = 0;
-          for(const seg of segs){ ms += overlapMs(seg[0], seg[1], start, end); }
-          if(ms>0) rows.push({ name, hours: +(ms/3600000).toFixed(2) });
-        }
-        rows.sort((a,b)=> a.name.localeCompare(b.name));
+        // Build per-day map applying overrides
         const days = [];
-        var d = start;
+        let d = start;
         while(d <= end){
           const dEnd = localEndOfDay(d);
+          const dateIso = dateFmt.format(new Date(d));
           const obj = [];
           for(const [name, segs] of intervals.entries()){
-            var ms = 0;
-            for(const seg of segs){ ms += overlapMs(seg[0], seg[1], d, dEnd); }
-            if(ms>0) obj.push([name, +(ms/3600000).toFixed(2)]);
+            let ms = 0;
+            for(const [a,b] of segs) ms += overlapMs(a,b,d,dEnd);
+            let hours = ms/3600000;
+            const ov = overrides[name+'|'+dateIso];
+            if(ov!=null && ov!=='') hours = +ov;
+            if(hours>0) obj.push([name, +hours.toFixed(2)]);
           }
-          if(obj.length>0) days.push({ date: dayKey(d), entries: obj.sort((a,b)=> a[0].localeCompare(b[0])) });
+          if(obj.length>0) days.push({ date: dateIso, entries: obj.sort((a,b)=> a[0].localeCompare(b[0])) });
           const nx = new Date(d); nx.setDate(nx.getDate()+1); d = nx.getTime();
         }
+        // Accumulate per person from per-day (so overrides are applied)
+        const agg = new Map();
+        for(const day of days){
+          for(const [n,h] of day.entries){
+            agg.set(n, (agg.get(n)||0)+h);
+          }
+        }
+        for(const [n, h] of agg.entries()){
+          rows.push({ name:n, hours:+h.toFixed(2) });
+        }
+        rows.sort((a,b)=> a.name.localeCompare(b.name));
         setReport({ rows, perDay: days, start: rangeStart, end: rangeEnd });
       }
 
-      // Today quick view (per person)
+      // Export range report CSV (per person)
+      function exportRangeCSV(){
+        if(!report.rows || report.rows.length===0){ window.alert('Generate the report first.'); return; }
+        const header = ['Name','Total hours ('+report.start+' to '+report.end+')'].join(',');
+        const lines = report.rows.map(r=> [csvSafe(r.name), r.hours.toFixed(2)].join(','));
+        const csv = [header, ...lines].join('\n');
+        downloadBlob(new Blob([csv],{type:'text/csv;charset=utf-8;'}), 'hours_'+report.start+'_to_'+report.end+'.csv');
+      }
+
+      // --- Individual detailed report ---
+      function generateIndividual(){
+        if(!person){ window.alert('Choose a staff member.'); return; }
+        if(!rangeStart || !rangeEnd){ window.alert('Choose start and end dates.'); return; }
+        const s = new Date(rangeStart); s.setHours(0,0,0,0);
+        const e = new Date(rangeEnd); e.setHours(23,59,59,999);
+        const start = s.getTime(), end = e.getTime();
+        // Collect this person's records in range (plus bordering for pairing)
+        const recs = records.filter(r=> r.name===person && r.ts <= end && r.ts >= (start - 86400000)); // small buffer
+        recs.sort((a,b)=>a.ts-b.ts);
+        // Build per-day rows: date, pairs, daily total (apply override), running total
+        const out = [];
+        let grand = 0;
+        // Build all intervals for this person using global logic (clip to days)
+        const intervals = buildIntervalsByPerson(records).get(person) || [];
+        let d = start;
+        while(d <= end){
+          const dEnd = localEndOfDay(d);
+          const dateIso = dateFmt.format(new Date(d));
+          const pairs = [];
+          for(const [a,b] of intervals){
+            const ms = overlapMs(a,b,d,dEnd);
+            if(ms>0){
+              // Clip in/out to this day when formatting
+              const inTs = Math.max(a, d);
+              const outTs = Math.min(b, dEnd);
+              pairs.push([formatTs(inTs), formatTs(outTs)]);
+            }
+          }
+          // compute hours and apply override
+          let msTot = 0;
+          for(const [a,b] of intervals) msTot += overlapMs(a,b,d,dEnd);
+          let hours = msTot/3600000;
+          const ov = overrides[person+'|'+dateIso];
+          const overridden = (ov!=null && ov!=='');
+          if(overridden) hours = +ov;
+          if(pairs.length>0 || overridden || hours>0){
+            grand += hours;
+            out.push({date:dateIso, pairs, hours:+hours.toFixed(2), overridden});
+          }
+          const nx = new Date(d); nx.setDate(nx.getDate()+1); d = nx.getTime();
+        }
+        setIndivRows(out);
+        setIndivTotal(+grand.toFixed(2));
+      }
+
+      function exportIndividualCSV(){
+        if(!person || indivRows.length===0){ window.alert('Generate the individual report first.'); return; }
+        const header = ['Staff','Date','Sign in','Sign out','Daily hours','Overridden?'];
+        const lines = [];
+        for(const row of indivRows){
+          if(row.pairs.length===0){
+            lines.push([csvSafe(person), row.date, '', '', row.hours.toFixed(2), row.overridden?'YES':'NO'].join(','));
+          } else {
+            for(const [i,o] of row.pairs){
+              lines.push([csvSafe(person), row.date, i, o, row.hours.toFixed(2), row.overridden?'YES':'NO'].join(','));
+            }
+          }
+        }
+        lines.push(['TOTAL', '', '', '', indivTotal.toFixed(2), ''].join(','));
+        const csv = [header.join(','), ...lines].join('\n');
+        downloadBlob(new Blob([csv],{type:'text/csv;charset=utf-8;'}), 'hours_'+person+'_'+rangeStart+'_to_'+rangeEnd+'.csv');
+      }
+
+      // Today quick view
       const todayTotals = useMemo(()=>{
         const key = todayKey();
         const todays = records.filter(r=> dayKey(r.ts)===key);
@@ -339,8 +436,8 @@
         const endNow = Date.now();
         for(const [name, recs] of by){
           recs.sort((a,b)=>a.ts-b.ts);
-          var ms=0;
-          for(var i=0;i<recs.length;i++){
+          let ms=0;
+          for(let i=0;i<recs.length;i++){
             if(recs[i].action==='IN'){
               const out = recs.slice(i+1).find(x=>x.action==='OUT');
               const outTs = out? out.ts : endNow;
@@ -381,7 +478,7 @@
         ),
         // Main
         el('main', {className:'mx-auto max-w-6xl p-4 grid lg:grid-cols-3 gap-6'},
-          // Left: Kiosk and Today view
+          // Left: Kiosk and Today
           el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-2'},
             el('h2', {className:'text-lg font-semibold mb-3 select-none'}, 'Kiosk'),
             el('div', {className:'flex gap-2 mb-3'},
@@ -419,7 +516,7 @@
               )
             )
           ),
-          // Right: Staff/Settings/Reports
+          // Right: Admin/Reports
           el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-1'},
             el('h2', {className:'text-lg font-semibold mb-3 select-none'}, 'Staff, Settings & Reports'),
             el('div', {className:'flex flex-col gap-3 mb-4'},
@@ -460,20 +557,30 @@
                     'Require reason for edits'
                   )
                 ),
-                // Daily totals (per person)
+                // Daily totals (per person) with overrides
                 el('div', {key:'daily', className:'rounded-2xl border p-3 bg-slate-50'},
-                  el('div', {className:'font-medium mb-2'}, 'Daily totals (per person)'),
+                  el('div', {className:'font-medium mb-2'}, 'Daily totals (per person) — with admin override'),
                   el('input', {type:'date', value:dailyDate, onChange:e=>setDailyDate(e.target.value), className:'rounded-xl border px-3 py-2 mb-2'}),
                   dailyTotals.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No hours for this date.') :
                   el('table', {className:'w-full text-sm'},
                     el('thead', {className:'bg-slate-100'},
-                      el('tr', null, el('th', {className:'text-left px-2 py-1'}, 'Name'), el('th', {className:'text-left px-2 py-1'}, 'Hours'))
+                      el('tr', null, 
+                        el('th', {className:'text-left px-2 py-1'}, 'Name'), 
+                        el('th', {className:'text-left px-2 py-1'}, 'Hours'),
+                        el('th', {className:'text-left px-2 py-1'}, 'Override')
+                      )
                     ),
                     el('tbody', null, ...dailyTotals.map(t=> el('tr', {key:t.name, className:'border-t'},
                       el('td', {className:'px-2 py-1'}, t.name),
-                      el('td', {className:'px-2 py-1'}, t.hours.toFixed(2))
+                      el('td', {className:'px-2 py-1'}, (t.overridden?'* ':'') + t.hours.toFixed(2)),
+                      el('td', {className:'px-2 py-1'}, 
+                        el('input', {type:'number', step:'0.01', min:'0', placeholder:'hrs', className:'w-24 rounded border px-2 py-1', 
+                          onChange:(e)=>{}, 
+                          onBlur:(e)=> setOverride(t.name, dailyDate, e.target.value)
+                        })
+                      )
                     )))
-                  )
+                  ),
                 ),
                 // Range report
                 el('div', {key:'reports', className:'rounded-2xl border p-3 bg-slate-50'},
@@ -485,6 +592,7 @@
                     el('input', {type:'date', value:rangeEnd, onChange:e=>setRangeEnd(e.target.value), className:'rounded-xl border px-3 py-2'}),
                     el('div', {className:'flex gap-2'},
                       el('button', {onClick:generateRangeReport, className:'rounded-xl bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700'}, 'Generate'),
+                      el('button', {onClick:exportRangeCSV, className:'rounded-xl border px-3 py-2'}, 'Export CSV'),
                       el('button', {onClick:()=>window.print(), className:'rounded-xl border px-3 py-2'}, 'Print report')
                     )
                   ),
@@ -522,6 +630,62 @@
                           )
                         ))
                       )
+                    )
+                  )
+                ),
+                // Individual detailed report
+                el('div', {key:'individual', className:'rounded-2xl border p-3 bg-slate-50'},
+                  el('div', {className:'font-medium mb-2'}, 'Individual detailed report'),
+                  el('div', {className:'grid grid-cols-1 gap-2'},
+                    el('label', {className:'text-sm'}, 'Staff member'),
+                    el('select', {value:person, onChange:e=>setPerson(e.target.value), className:'rounded-xl border px-3 py-2'},
+                      el('option', {value:''}, 'Select…'),
+                      ...staff.map(s=> el('option', {key:s.name, value:s.name}, s.name))
+                    ),
+                    el('label', {className:'text-sm'}, 'Start date'),
+                    el('input', {type:'date', value:rangeStart, onChange:e=>setRangeStart(e.target.value), className:'rounded-xl border px-3 py-2'}),
+                    el('label', {className:'text-sm'}, 'End date'),
+                    el('input', {type:'date', value:rangeEnd, onChange:e=>setRangeEnd(e.target.value), className:'rounded-xl border px-3 py-2'}),
+                    el('div', {className:'flex gap-2'},
+                      el('button', {onClick:generateIndividual, className:'rounded-xl bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700'}, 'Generate'),
+                      el('button', {onClick:exportIndividualCSV, className:'rounded-xl border px-3 py-2'}, 'Export CSV'),
+                      el('button', {onClick:()=>window.print(), className:'rounded-xl border px-3 py-2'}, 'Print')
+                    )
+                  ),
+                  el('div', {id:'printable-individual', className:'mt-3 bg-white border rounded-xl p-3'},
+                    indivRows.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No report yet.') :
+                    el('div', null,
+                      el('div', {className:'text-sm text-slate-600 mb-2'}, 'Report for '+person+': '+rangeStart+' → '+rangeEnd),
+                      el('table', {className:'w-full text-sm'},
+                        el('thead', {className:'bg-slate-100'},
+                          el('tr', null,
+                            el('th', {className:'text-left px-2 py-1'}, 'Date'),
+                            el('th', {className:'text-left px-2 py-1'}, 'Sign in'),
+                            el('th', {className:'text-left px-2 py-1'}, 'Sign out'),
+                            el('th', {className:'text-left px-2 py-1'}, 'Daily hours')
+                          )
+                        ),
+                        el('tbody', null,
+                          ...indivRows.flatMap(row=>{
+                            if(row.pairs.length===0){
+                              return [el('tr', {key:row.date, className:'border-t'},
+                                el('td', {className:'px-2 py-1'}, row.date),
+                                el('td', {className:'px-2 py-1'}, ''),
+                                el('td', {className:'px-2 py-1'}, ''),
+                                el('td', {className:'px-2 py-1'}, (row.overridden?'* ':'') + row.hours.toFixed(2))
+                              )];
+                            }
+                            return row.pairs.map((p,idx)=> el('tr', {key:row.date+'_'+idx, className:'border-t'},
+                              el('td', {className:'px-2 py-1'}, idx===0? row.date : ''),
+                              el('td', {className:'px-2 py-1'}, p[0]),
+                              el('td', {className:'px-2 py-1'}, p[1]),
+                              el('td', {className:'px-2 py-1'}, idx===0? (row.overridden?'* ':'') + row.hours.toFixed(2) : '')
+                            ));
+                          })
+                        )
+                      ),
+                      el('div', {className:'text-right font-semibold mt-2'}, 'Total hours: '+indivTotal.toFixed(2)),
+                      el('div', {className:'text-xs text-slate-500 mt-1'}, '* = Admin override applied')
                     )
                   )
                 ),

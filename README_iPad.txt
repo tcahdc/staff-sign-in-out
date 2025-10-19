@@ -1,5 +1,6 @@
-Compatibility build (v3)
-- Adds crypto.randomUUID polyfill for older iPad Safari.
-- Visible on-screen error banner if a JS error occurs (to avoid blank page).
-- Keeps daily totals (per person), date-range report (per person), and print-friendly report.
-- Service worker cache bumped to v7 so it updates after upload.
+v4 additions
+- Range CSV export (per-person totals).
+- Daily totals view for all individuals (admin), with per-day override input.
+- Overrides are stored in localStorage and applied to all totals/reports. An audit entry is recorded.
+- Individual detailed report: date, sign-in/out pairs, daily total, and period grand total; includes Print + CSV.
+- Service worker cache bumped to v8 (forces update).

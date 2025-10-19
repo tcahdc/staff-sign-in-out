@@ -1,5 +1,5 @@
-// cache bump to v7 for this build
-const CACHE = "signio-cache-v7";
+// cache bump to v8 for this build
+const CACHE = "signio-cache-v8";
 const ASSETS = ["./","./index.html","./manifest.webmanifest","./icon-192.png"];
 self.addEventListener("install", (e)=>{
   e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)));
