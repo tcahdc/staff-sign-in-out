@@ -53,6 +53,8 @@
       const [admin, setAdmin] = useState({enabled:false, by:''});
       const [confirmClear, setConfirmClear] = useState(false);
 
+      // Reports state
+      const [dailyDate, setDailyDate] = useState(()=> todayLocalISO());
       const [rangeStart, setRangeStart] = useState(()=> todayLocalISO());
       const [rangeEnd, setRangeEnd] = useState(()=> todayLocalISO());
       const [report, setReport] = useState({ rows: [], perDay: [], start: '', end: '' });
@@ -86,6 +88,7 @@
         return rec;
       };
 
+      // Auto midnight OUT
       useEffect(()=>{
         const closeStale = (limit)=>{
           const lastMap = new Map(); for(const r of records) lastMap.set(r.name, {action:r.action, ts:r.ts});
@@ -195,30 +198,27 @@
         setAudit(a=> [...a, {id:crypto.randomUUID(), when:now, editor:admin.by, type:'BULK_OUT', reason:'End-of-day bulk sign-out'}]);
       };
 
-      function csvSafe(s){ const q='"'; if(s==null) return ''; const str=String(s); if(/[",
-]/.test(str)) return q+str.replaceAll('"','""')+q; return str; }
+      function csvSafe(s){ const q='"'; if(s==null) return ''; const str=String(s); if(/[",\n]/.test(str)) return q+str.replaceAll('"','""')+q; return str; }
       function dateFileSafe(d){ const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
       function downloadBlob(blob, filename){ const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; a.click(); URL.revokeObjectURL(url); }
       const exportCSV = () => {
         const header = ['ID','Name','Action','Timestamp','LocalTime ('+settings.timezone+')'].join(',');
         const lines = records.map(r=> [r.id,csvSafe(r.name),r.action,new Date(r.ts).toISOString(),csvSafe(formatTs(r.ts))].join(','));
-        const csv = [header, ...lines].join('
-');
+        const csv = [header, ...lines].join('\n');
         downloadBlob(new Blob([csv],{type:'text/csv;charset=utf-8;'}), `signio_records_${dateFileSafe(new Date())}.csv`);
       };
       const exportAuditCSV = () => {
         const header = ['AuditID','WhenISO','Editor','Type','RecordID','TargetName','OldAction','NewAction','OldTsISO','NewTsISO','Reason'].join(',');
         const lines = audit.map(a=> [a.id,new Date(a.when).toISOString(),csvSafe(a.editor),a.type,a.recordId||'',csvSafe(a.targetName||''),a.oldAction||'',a.newAction||'',a.oldTs?new Date(a.oldTs).toISOString():'',a.newTs?new Date(a.newTs).toISOString():'',csvSafe(a.reason||'')].join(','));
-        const csv = [header, ...lines].join('
-');
+        const csv = [header, ...lines].join('\n');
         downloadBlob(new Blob([csv],{type:'text/csv;charset=utf-8;'}), `signio_audit_${dateFileSafe(new Date())}.csv`);
       };
 
       const clearAll = () => { if(!confirmClear){ setConfirmClear(true); return; } setRecords([]); setAudit([]); setConfirmClear(false); };
 
+      // Build IN/OUT intervals per person
       function buildIntervalsByPerson(recs){
-        const by = new Map();
-        for(const s of staff) by.set(s.name, []);
+        const by = new Map(); for(const s of staff) by.set(s.name, []);
         const sorted = [...recs].sort((a,b)=> a.ts-b.ts);
         const open = new Map();
         for(const r of sorted){
@@ -237,39 +237,28 @@
         }
         return by;
       }
-
       function overlapMs(aStart, aEnd, bStart, bEnd){
         const start = Math.max(aStart, bStart);
         const end = Math.min(aEnd, bEnd);
         return Math.max(0, end - start);
       }
 
-      const perDayTotals = useMemo(()=>{
-        if(records.length===0) return [];
+      // Daily totals (per person) for chosen date
+      const dailyTotals = useMemo(()=>{
+        if(!dailyDate) return [];
+        const start = new Date(dailyDate); start.setHours(0,0,0,0);
+        const end = new Date(dailyDate); end.setHours(23,59,59,999);
         const intervals = buildIntervalsByPerson(records);
-        const minTs = Math.min(...records.map(r=>r.ts));
-        const maxTs = Math.max(...records.map(r=>r.ts));
-        const days = new Map();
-        let dayStart = (d=>{ const x=new Date(d); x.setHours(0,0,0,0); return x.getTime(); })(minTs);
-        const endLimit = (d=>{ const x=new Date(d); x.setHours(23,59,59,999); return x.getTime(); })(maxTs);
-        while(dayStart <= endLimit){
-          const dayEnd = (d=>{ const x=new Date(d); x.setHours(23,59,59,999); return x.getTime(); })(dayStart);
-          for(const [name, segs] of intervals.entries()){
-            let ms = 0;
-            for(const [s,e] of segs) ms += overlapMs(s,e,dayStart,dayEnd);
-            if(ms>0){
-              const key = dayKey(dayStart);
-              if(!days.has(key)) days.set(key, {});
-              days.get(key)[name] = (ms/3600000);
-            }
-          }
-          const next = new Date(dayStart); next.setDate(next.getDate()+1); dayStart = next.getTime();
+        const rows = [];
+        for(const [name,segs] of intervals.entries()){
+          let ms = 0;
+          for(const [a,b] of segs) ms += overlapMs(a,b,start.getTime(),end.getTime());
+          if(ms>0) rows.push({name, hours:+(ms/3600000).toFixed(2)});
         }
-        const rows = [...days.entries()].sort((a,b)=> a[0].localeCompare(b[0]))
-          .map(([date, obj])=> ({ date, entries: Object.entries(obj).sort((a,b)=> a[0].localeCompare(b[0])) }));
-        return rows;
-      }, [records, staff, settings.timezone]);
+        return rows.sort((a,b)=> a.name.localeCompare(b.name));
+      }, [dailyDate, records, staff]);
 
+      // Range report (per person) + per-day breakdown
       function generateRangeReport(){
         if(!rangeStart || !rangeEnd){ setReport({rows:[], perDay:[], start:'', end:''}); return; }
         const s = new Date(rangeStart); s.setHours(0,0,0,0);
@@ -286,7 +275,7 @@
         const days = [];
         let d = start;
         while(d <= end){
-          const dEnd = (x=>{ const t=new Date(x); t.setHours(23,59,59,999); return t.getTime(); })(d);
+          const dEnd = localEndOfDay(d);
           const obj = [];
           for(const [name, segs] of intervals.entries()){
             let ms = 0;
@@ -299,6 +288,7 @@
         setReport({ rows, perDay: days, start: rangeStart, end: rangeEnd });
       }
 
+      // Today quick view (per person)
       const todayTotals = useMemo(()=>{
         const key = todayKey();
         const todays = records.filter(r=> dayKey(r.ts)===key);
@@ -326,6 +316,7 @@
       const [newName, setNewName] = useState('');
 
       return el('div', {className:'min-h-screen w-full bg-slate-50 text-slate-900 touch-manipulation'},
+        // Header
         el('header', {className:'sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-slate-200 px-4 py-3 flex items-center justify-between'},
           el('div', {className:'flex items-center gap-3'},
             el('span', {className:'inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-600 font-bold select-none'}, 'IO'),
@@ -347,7 +338,9 @@
             el('button', {onClick: ()=> window.print(), className:'rounded-2xl px-3 py-2 text-sm border hide-on-print'}, 'Print')
           )
         ),
+        // Main
         el('main', {className:'mx-auto max-w-6xl p-4 grid lg:grid-cols-3 gap-6'},
+          // Left: Kiosk and Quick views
           el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-2'},
             el('h2', {className:'text-lg font-semibold mb-3 select-none'}, 'Kiosk'),
             el('div', {className:'flex gap-2 mb-3'},
@@ -370,24 +363,22 @@
                 el('button', {disabled:!selected, onClick:()=>startSign(selected,'OUT'), className:'rounded-2xl px-8 py-4 bg-slate-900 text-white disabled:opacity-40 hover:bg-slate-800 text-lg font-semibold'}, 'Sign Out')
               )
             ),
+            // Today totals quick view (per person)
             el('div', {className:'mt-4 rounded-xl bg-slate-50 border p-3'},
-              el('div', {className:'font-medium mb-2'}, 'Per-day totals (all staff)'),
-              perDayTotals.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No hours yet.') :
-              el('div', {className:'flex flex-col gap-2'},
-                ...perDayTotals.map(d=> el('div', {key:d.date, className:'rounded-xl border bg-white p-2'},
-                  el('div', {className:'text-sm font-semibold mb-1'}, d.date),
-                  el('table', {className:'w-full text-sm'},
-                    el('tbody', null,
-                      ...d.entries.map(([n,h])=> el('tr', {key:n},
-                        el('td', {className:'px-2 py-1 w-1/2'}, n),
-                        el('td', {className:'px-2 py-1'}, h.toFixed(2))
-                      ))
-                    )
-                  )
-                ))
+              el('div', {className:'font-medium mb-2'}, 'Today totals (per person)'),
+              todayTotals.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No hours yet today.') :
+              el('table', {className:'w-full text-sm'},
+                el('thead', {className:'bg-slate-100'},
+                  el('tr', null, el('th', {className:'text-left px-2 py-1'}, 'Name'), el('th', {className:'text-left px-2 py-1'}, 'Hours'))
+                ),
+                el('tbody', null, ...todayTotals.map(t=> el('tr', {key:t.name, className:'border-t'},
+                  el('td', {className:'px-2 py-1'}, t.name),
+                  el('td', {className:'px-2 py-1'}, t.hours.toFixed(2))
+                )))
               )
             )
           ),
+          // Right: Staff/Settings/Reports
           el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-1'},
             el('h2', {className:'text-lg font-semibold mb-3 select-none'}, 'Staff, Settings & Reports'),
             el('div', {className:'flex flex-col gap-3 mb-4'},
@@ -428,15 +419,24 @@
                     'Require reason for edits'
                   )
                 ),
-                el('div', {key:'admtools', className:'rounded-2xl border p-3 bg-amber-50'},
-                  el('div', {className:'font-medium mb-2'}, 'Admin tools'),
-                  el('div', {className:'flex gap-2 flex-wrap'},
-                    el('button', {onClick:addBackdatedOut, className:'rounded-xl bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700'}, 'Add backdated OUT'),
-                    el('button', {onClick:bulkOut, className:'rounded-xl bg-slate-900 text-white px-3 py-2 hover:bg-slate-800'}, 'Sign everyone OUT (now)')
+                // Daily totals (per person)
+                el('div', {key:'daily', className:'rounded-2xl border p-3 bg-slate-50'},
+                  el('div', {className:'font-medium mb-2'}, 'Daily totals (per person)'),
+                  el('input', {type:'date', value:dailyDate, onChange:e=>setDailyDate(e.target.value), className:'rounded-xl border px-3 py-2 mb-2'}),
+                  dailyTotals.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No hours for this date.') :
+                  el('table', {className:'w-full text-sm'},
+                    el('thead', {className:'bg-slate-100'},
+                      el('tr', null, el('th', {className:'text-left px-2 py-1'}, 'Name'), el('th', {className:'text-left px-2 py-1'}, 'Hours'))
+                    ),
+                    el('tbody', null, ...dailyTotals.map(t=> el('tr', {key:t.name, className:'border-t'},
+                      el('td', {className:'px-2 py-1'}, t.name),
+                      el('td', {className:'px-2 py-1'}, t.hours.toFixed(2))
+                    )))
                   )
                 ),
+                // Range report
                 el('div', {key:'reports', className:'rounded-2xl border p-3 bg-slate-50'},
-                  el('div', {className:'font-medium mb-2'}, 'Hours report'),
+                  el('div', {className:'font-medium mb-2'}, 'Hours report (per person)'),
                   el('div', {className:'grid grid-cols-1 gap-2'},
                     el('label', {className:'text-sm'}, 'Start date'),
                     el('input', {type:'date', value:rangeStart, onChange:e=>setRangeStart(e.target.value), className:'rounded-xl border px-3 py-2'}),
@@ -490,25 +490,11 @@
               el('div', {className:'rounded-2xl border p-3 min-h-[3rem] bg-slate-50'},
                 currentlyIn.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No one is signed in.')
                 : el('ul', {className:'text-sm flex flex-wrap gap-2'}, ...currentlyIn.map(n=> el('li', {key:n, className:'inline-flex items-center px-2 py-1 rounded-xl bg-emerald-100 text-emerald-700'}, n)))
-              ),
-              el('h3', {className:'text-base font-semibold mt-3 mb-2 select-none'}, 'Today view (hours)'),
-              el('div', {className:'rounded-2xl border p-3 bg-slate-50'},
-                todayTotals.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No hours to show yet.')
-                : el('table', {className:'w-full text-sm'},
-                    el('thead', {className:'bg-slate-100'},
-                      el('tr', null, el('th', {className:'text-left px-2 py-1'}, 'Name'), el('th', {className:'text-left px-2 py-1'}, 'Hours today'))
-                    ),
-                    el('tbody', null,
-                      ...todayTotals.map(t=> el('tr', {key:t.name, className:'border-t'},
-                        el('td', {className:'px-2 py-1'}, t.name),
-                        el('td', {className:'px-2 py-1'}, t.hours.toFixed(2))
-                      ))
-                    )
-                )
               )
             )
           )
         ),
+        // Records table
         el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-3'},
           el('h3', {className:'text-base font-semibold mb-2 select-none'}, 'Recent Activity'),
           el('div', {className:'overflow-auto border rounded-2xl'},
@@ -528,7 +514,7 @@
                   el('td', {className:'px-3 py-2'}, el('span', {className:`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${r.action==='IN'?'bg-emerald-100 text-emerald-700':'bg-slate-200 text-slate-800'}`}, r.action)),
                   el('td', {className:'px-3 py-2'}, admin.enabled && el('button', {onClick:()=>saveEdit(r.id), className:'rounded-xl border px-2 py-1 text-xs'}, 'Edit'))
                 )),
-                records.length===0 and el('tr', None, el('td', {className:'px-3 py-4 text-slate-500', colSpan:4}, 'No records yet. Select a staff member and tap Sign In / Sign Out.'))
+                records.length===0 ? el('tr', null, el('td', {className:'px-3 py-4 text-slate-500', colSpan:4}, 'No records yet. Select a staff member and tap Sign In / Sign Out.')) : null
               )
             )
           )

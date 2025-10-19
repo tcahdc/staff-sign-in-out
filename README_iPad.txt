@@ -1,4 +1,5 @@
 New features
-- Per-day totals (all staff)
-- Date range report with totals per staff and per-day breakdown
-- Print-friendly report (only the report prints)
+- Daily totals (per person) with a date picker
+- Date range report (per person) + per-day breakdown
+- Print-friendly report section only
+How to update: upload these files to your GitHub repo root and commit; the cache is bumped (v6) so iPad updates automatically after reopening.
