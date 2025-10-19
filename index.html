@@ -18,7 +18,12 @@
     html, body { -webkit-tap-highlight-color: transparent; }
     button { touch-action: manipulation; }
     input, select, textarea { font-size: 16px; }
-    @media print { header, footer, .no-print { display:none !important } main { padding:0 } table { font-size: 11px } }
+    @media print {
+      header, footer, .no-print, .hide-on-print { display:none !important }
+      #printable-report { display:block !important }
+      table { font-size: 11px }
+      body { background: white }
+    }
   </style>
 </head>
 <body class="antialiased bg-slate-50 text-slate-900">
@@ -34,12 +39,10 @@
     const { useEffect, useMemo, useRef, useState } = React;
 
     function App(){
-      // Helpers
       const loadLS = (k, fb) => { try{ const v = localStorage.getItem(k); return v? JSON.parse(v): fb; }catch{ return fb; } };
       const saveLS = (k, v) => localStorage.setItem(k, JSON.stringify(v));
       const migrateStaff = (s) => Array.isArray(s) && s.length ? (typeof s[0]==='string' ? s.map(n=>({name:n, pin:''})) : s.map(x=>({name:x.name, pin:x.pin||''}))) : [];
 
-      // State
       const [staff, setStaff] = useState(()=> migrateStaff(loadLS('signio_staff', ['CJ An','Emily','Ebony','Charlotte','Reegan','Holly'])));
       const [records, setRecords] = useState(()=> loadLS('signio_records', []));
       const [audit, setAudit] = useState(()=> loadLS('signio_audit', []));
@@ -50,18 +53,25 @@
       const [admin, setAdmin] = useState({enabled:false, by:''});
       const [confirmClear, setConfirmClear] = useState(false);
 
+      const [rangeStart, setRangeStart] = useState(()=> todayLocalISO());
+      const [rangeEnd, setRangeEnd] = useState(()=> todayLocalISO());
+      const [report, setReport] = useState({ rows: [], perDay: [], start: '', end: '' });
+
       useEffect(()=> saveLS('signio_staff', staff), [staff]);
       useEffect(()=> saveLS('signio_records', records), [records]);
       useEffect(()=> saveLS('signio_audit', audit), [audit]);
       useEffect(()=> saveLS('signio_settings', settings), [settings]);
 
-      // Time
       const dateFmt = useMemo(()=> new Intl.DateTimeFormat('en-CA', {timeZone:settings.timezone, year:'numeric', month:'2-digit', day:'2-digit'}), [settings.timezone]);
       const fmt = useMemo(()=> new Intl.DateTimeFormat('en-AU', {timeZone:settings.timezone, year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:!settings.show24h}), [settings.timezone, settings.show24h]);
       const formatTs = (ts)=> fmt.format(new Date(ts));
       const dayKey = (ts)=> dateFmt.format(new Date(ts));
       const todayKey = ()=> dayKey(Date.now());
       const [lastDayKey, setLastDayKey] = useState(todayKey());
+
+      function localMidnight(ts){ const d = new Date(ts); d.setHours(0,0,0,0); return d.getTime(); }
+      function localEndOfDay(ts){ const d = new Date(ts); d.setHours(23,59,59,999); return d.getTime(); }
+      function todayLocalISO(){ const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0,10); }
 
       const visibleStaff = useMemo(()=> staff.filter(s=> s.name.toLowerCase().includes(filter.toLowerCase())), [staff, filter]);
       const lastActionFor = (name)=> { for(let i=records.length-1;i>=0;i--){ if(records[i].name===name) return {action:records[i].action, ts:records[i].ts}; } return null; };
@@ -76,7 +86,6 @@
         return rec;
       };
 
-      // Auto midnight OUT
       useEffect(()=>{
         const closeStale = (limit)=>{
           const lastMap = new Map(); for(const r of records) lastMap.set(r.name, {action:r.action, ts:r.ts});
@@ -108,7 +117,6 @@
         return ()=> clearInterval(id);
       }, [records.length, settings.timezone, settings.autoMidnightOut, lastDayKey]);
 
-      // Core actions with simple PIN prompts
       const promptPIN = (who) => window.prompt(`Enter PIN for ${who} (leave blank if none):`) || '';
       const startSign = (name, action) => {
         if(!name) return;
@@ -148,7 +156,6 @@
         if(selected===name) setSelected('');
       };
 
-      // Admin edits
       const saveEdit = (recId) => {
         const rec = records.find(r=>r.id===recId); if(!rec) return;
         const newAction = window.prompt('Action (IN or OUT):', rec.action) || rec.action;
@@ -188,26 +195,110 @@
         setAudit(a=> [...a, {id:crypto.randomUUID(), when:now, editor:admin.by, type:'BULK_OUT', reason:'End-of-day bulk sign-out'}]);
       };
 
-      // CSV export
-      function csvSafe(s){ const q='"'; if(s==null) return ''; const str=String(s); if(/[",\n]/.test(str)) return q+str.replaceAll('"','""')+q; return str; }
+      function csvSafe(s){ const q='"'; if(s==null) return ''; const str=String(s); if(/[",
+]/.test(str)) return q+str.replaceAll('"','""')+q; return str; }
       function dateFileSafe(d){ const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
       function downloadBlob(blob, filename){ const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; a.click(); URL.revokeObjectURL(url); }
       const exportCSV = () => {
         const header = ['ID','Name','Action','Timestamp','LocalTime ('+settings.timezone+')'].join(',');
         const lines = records.map(r=> [r.id,csvSafe(r.name),r.action,new Date(r.ts).toISOString(),csvSafe(formatTs(r.ts))].join(','));
-        const csv = [header, ...lines].join('\n');
+        const csv = [header, ...lines].join('
+');
         downloadBlob(new Blob([csv],{type:'text/csv;charset=utf-8;'}), `signio_records_${dateFileSafe(new Date())}.csv`);
       };
       const exportAuditCSV = () => {
         const header = ['AuditID','WhenISO','Editor','Type','RecordID','TargetName','OldAction','NewAction','OldTsISO','NewTsISO','Reason'].join(',');
         const lines = audit.map(a=> [a.id,new Date(a.when).toISOString(),csvSafe(a.editor),a.type,a.recordId||'',csvSafe(a.targetName||''),a.oldAction||'',a.newAction||'',a.oldTs?new Date(a.oldTs).toISOString():'',a.newTs?new Date(a.newTs).toISOString():'',csvSafe(a.reason||'')].join(','));
-        const csv = [header, ...lines].join('\n');
+        const csv = [header, ...lines].join('
+');
         downloadBlob(new Blob([csv],{type:'text/csv;charset=utf-8;'}), `signio_audit_${dateFileSafe(new Date())}.csv`);
       };
 
       const clearAll = () => { if(!confirmClear){ setConfirmClear(true); return; } setRecords([]); setAudit([]); setConfirmClear(false); };
 
-      // Today view
+      function buildIntervalsByPerson(recs){
+        const by = new Map();
+        for(const s of staff) by.set(s.name, []);
+        const sorted = [...recs].sort((a,b)=> a.ts-b.ts);
+        const open = new Map();
+        for(const r of sorted){
+          if(r.action==='IN') open.set(r.name, r.ts);
+          else if(r.action==='OUT'){
+            const start = open.get(r.name);
+            if(start!=null && r.ts > start){
+              by.get(r.name)?.push([start, r.ts]);
+              open.delete(r.name);
+            }
+          }
+        }
+        const now = Date.now();
+        for(const [name,start] of open.entries()){
+          by.get(name)?.push([start, now]);
+        }
+        return by;
+      }
+
+      function overlapMs(aStart, aEnd, bStart, bEnd){
+        const start = Math.max(aStart, bStart);
+        const end = Math.min(aEnd, bEnd);
+        return Math.max(0, end - start);
+      }
+
+      const perDayTotals = useMemo(()=>{
+        if(records.length===0) return [];
+        const intervals = buildIntervalsByPerson(records);
+        const minTs = Math.min(...records.map(r=>r.ts));
+        const maxTs = Math.max(...records.map(r=>r.ts));
+        const days = new Map();
+        let dayStart = (d=>{ const x=new Date(d); x.setHours(0,0,0,0); return x.getTime(); })(minTs);
+        const endLimit = (d=>{ const x=new Date(d); x.setHours(23,59,59,999); return x.getTime(); })(maxTs);
+        while(dayStart <= endLimit){
+          const dayEnd = (d=>{ const x=new Date(d); x.setHours(23,59,59,999); return x.getTime(); })(dayStart);
+          for(const [name, segs] of intervals.entries()){
+            let ms = 0;
+            for(const [s,e] of segs) ms += overlapMs(s,e,dayStart,dayEnd);
+            if(ms>0){
+              const key = dayKey(dayStart);
+              if(!days.has(key)) days.set(key, {});
+              days.get(key)[name] = (ms/3600000);
+            }
+          }
+          const next = new Date(dayStart); next.setDate(next.getDate()+1); dayStart = next.getTime();
+        }
+        const rows = [...days.entries()].sort((a,b)=> a[0].localeCompare(b[0]))
+          .map(([date, obj])=> ({ date, entries: Object.entries(obj).sort((a,b)=> a[0].localeCompare(b[0])) }));
+        return rows;
+      }, [records, staff, settings.timezone]);
+
+      function generateRangeReport(){
+        if(!rangeStart || !rangeEnd){ setReport({rows:[], perDay:[], start:'', end:''}); return; }
+        const s = new Date(rangeStart); s.setHours(0,0,0,0);
+        const e = new Date(rangeEnd); e.setHours(23,59,59,999);
+        const start = s.getTime(), end = e.getTime();
+        const intervals = buildIntervalsByPerson(records);
+        const rows = [];
+        for(const [name, segs] of intervals.entries()){
+          let ms = 0;
+          for(const [a,b] of segs) ms += overlapMs(a,b,start,end);
+          if(ms>0) rows.push({ name, hours: +(ms/3600000).toFixed(2) });
+        }
+        rows.sort((a,b)=> a.name.localeCompare(b.name));
+        const days = [];
+        let d = start;
+        while(d <= end){
+          const dEnd = (x=>{ const t=new Date(x); t.setHours(23,59,59,999); return t.getTime(); })(d);
+          const obj = [];
+          for(const [name, segs] of intervals.entries()){
+            let ms = 0;
+            for(const [a,b] of segs) ms += overlapMs(a,b,d,dEnd);
+            if(ms>0) obj.push([name, +(ms/3600000).toFixed(2)]);
+          }
+          if(obj.length>0) days.push({ date: dayKey(d), entries: obj.sort((a,b)=> a[0].localeCompare(b[0])) });
+          const nx = new Date(d); nx.setDate(nx.getDate()+1); d = nx.getTime();
+        }
+        setReport({ rows, perDay: days, start: rangeStart, end: rangeEnd });
+      }
+
       const todayTotals = useMemo(()=>{
         const key = todayKey();
         const todays = records.filter(r=> dayKey(r.ts)===key);
@@ -230,13 +321,11 @@
         return res.sort((a,b)=>a.name.localeCompare(b.name));
       }, [records, staff, settings.timezone]);
 
-      // UI
       const el = React.createElement;
       const nameInputRef = useRef(null);
       const [newName, setNewName] = useState('');
 
       return el('div', {className:'min-h-screen w-full bg-slate-50 text-slate-900 touch-manipulation'},
-        // Header
         el('header', {className:'sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-slate-200 px-4 py-3 flex items-center justify-between'},
           el('div', {className:'flex items-center gap-3'},
             el('span', {className:'inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-600 font-bold select-none'}, 'IO'),
@@ -255,12 +344,10 @@
             el('button', {onClick: exportAuditCSV, className:'rounded-xl px-3 py-2 text-sm border'}, 'Export Audit'),
             el('button', {onClick: ()=> setSettings(s=>({...s, compactRows: !s.compactRows})), className:'rounded-xl px-3 py-2 text-sm border'}, settings.compactRows? 'Comfortable rows':'Compact rows'),
             el('button', {onClick: ()=> setSettings(s=>({...s, show24h: !s.show24h})), className:'rounded-xl px-3 py-2 text-sm border'}, settings.show24h? '12‑hour':'24‑hour'),
-            el('button', {onClick: ()=> window.print(), className:'rounded-2xl px-3 py-2 text-sm border'}, 'Print')
+            el('button', {onClick: ()=> window.print(), className:'rounded-2xl px-3 py-2 text-sm border hide-on-print'}, 'Print')
           )
         ),
-        // Main
         el('main', {className:'mx-auto max-w-6xl p-4 grid lg:grid-cols-3 gap-6'},
-          // Left
           el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-2'},
             el('h2', {className:'text-lg font-semibold mb-3 select-none'}, 'Kiosk'),
             el('div', {className:'flex gap-2 mb-3'},
@@ -282,11 +369,27 @@
                 el('button', {disabled:!selected, onClick:()=>startSign(selected,'IN'), className:'rounded-2xl px-8 py-4 bg-emerald-600 text-white disabled:opacity-40 hover:bg-emerald-700 text-lg font-semibold'}, 'Sign In'),
                 el('button', {disabled:!selected, onClick:()=>startSign(selected,'OUT'), className:'rounded-2xl px-8 py-4 bg-slate-900 text-white disabled:opacity-40 hover:bg-slate-800 text-lg font-semibold'}, 'Sign Out')
               )
+            ),
+            el('div', {className:'mt-4 rounded-xl bg-slate-50 border p-3'},
+              el('div', {className:'font-medium mb-2'}, 'Per-day totals (all staff)'),
+              perDayTotals.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No hours yet.') :
+              el('div', {className:'flex flex-col gap-2'},
+                ...perDayTotals.map(d=> el('div', {key:d.date, className:'rounded-xl border bg-white p-2'},
+                  el('div', {className:'text-sm font-semibold mb-1'}, d.date),
+                  el('table', {className:'w-full text-sm'},
+                    el('tbody', null,
+                      ...d.entries.map(([n,h])=> el('tr', {key:n},
+                        el('td', {className:'px-2 py-1 w-1/2'}, n),
+                        el('td', {className:'px-2 py-1'}, h.toFixed(2))
+                      ))
+                    )
+                  )
+                ))
+              )
             )
           ),
-          // Right
           el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-1'},
-            el('h2', {className:'text-lg font-semibold mb-3 select-none'}, 'Staff & Settings'),
+            el('h2', {className:'text-lg font-semibold mb-3 select-none'}, 'Staff, Settings & Reports'),
             el('div', {className:'flex flex-col gap-3 mb-4'},
               el('div', {className:'flex gap-2'},
                 el('input', {ref:(r)=>nameInputRef.current=r, value:newName, onChange:e=>setNewName(e.target.value), placeholder:'Add staff name', className:'flex-1 rounded-xl border px-3 py-3 text-base'}),
@@ -332,6 +435,53 @@
                     el('button', {onClick:bulkOut, className:'rounded-xl bg-slate-900 text-white px-3 py-2 hover:bg-slate-800'}, 'Sign everyone OUT (now)')
                   )
                 ),
+                el('div', {key:'reports', className:'rounded-2xl border p-3 bg-slate-50'},
+                  el('div', {className:'font-medium mb-2'}, 'Hours report'),
+                  el('div', {className:'grid grid-cols-1 gap-2'},
+                    el('label', {className:'text-sm'}, 'Start date'),
+                    el('input', {type:'date', value:rangeStart, onChange:e=>setRangeStart(e.target.value), className:'rounded-xl border px-3 py-2'}),
+                    el('label', {className:'text-sm'}, 'End date'),
+                    el('input', {type:'date', value:rangeEnd, onChange:e=>setRangeEnd(e.target.value), className:'rounded-xl border px-3 py-2'}),
+                    el('div', {className:'flex gap-2'},
+                      el('button', {onClick:generateRangeReport, className:'rounded-xl bg-emerald-600 text-white px-3 py-2 hover:bg-emerald-700'}, 'Generate'),
+                      el('button', {onClick:()=>window.print(), className:'rounded-xl border px-3 py-2'}, 'Print report')
+                    )
+                  ),
+                  el('div', {id:'printable-report', className:'mt-3 bg-white border rounded-xl p-3'},
+                    report.rows.length===0 ? el('div', {className:'text-sm text-slate-500'}, 'No report yet.') :
+                    el('div', null,
+                      el('div', {className:'text-sm text-slate-600 mb-2'}, `Report: ${report.start} → ${report.end}`),
+                      el('table', {className:'w-full text-sm'},
+                        el('thead', {className:'bg-slate-100'},
+                          el('tr', null,
+                            el('th', {className:'text-left px-2 py-1'}, 'Name'),
+                            el('th', {className:'text-left px-2 py-1'}, 'Total hours')
+                          )
+                        ),
+                        el('tbody', null,
+                          ...report.rows.map(r=> el('tr', {key:r.name, className:'border-t'},
+                            el('td', {className:'px-2 py-1'}, r.name),
+                            el('td', {className:'px-2 py-1'}, r.hours.toFixed(2))
+                          ))
+                        )
+                      ),
+                      el('div', {className:'mt-3'},
+                        el('div', {className:'font-medium mb-1'}, 'Per-day breakdown'),
+                        ...report.perDay.map(d=> el('div', {key:d.date, className:'rounded-xl border bg-white p-2 mb-2'},
+                          el('div', {className:'text-sm font-semibold mb-1'}, d.date),
+                          el('table', {className:'w-full text-sm'},
+                            el('tbody', null,
+                              ...d.entries.map(([n,h])=> el('tr', {key:n},
+                                el('td', {className:'px-2 py-1 w-1/2'}, n),
+                                el('td', {className:'px-2 py-1'}, Number(h).toFixed(2))
+                              ))
+                            )
+                          )
+                        ))
+                      )
+                    )
+                  )
+                ),
                 el('div', {key:'clear', className:'flex items-center gap-2 mt-2'},
                   el('button', {onClick:clearAll, className:`rounded-xl px-3 py-2 border ${confirmClear?'border-red-500 text-red-600':''}`}, confirmClear? 'Click again to confirm – Clear ALL records' : 'Clear ALL records')
                 )
@@ -348,16 +498,17 @@
                     el('thead', {className:'bg-slate-100'},
                       el('tr', null, el('th', {className:'text-left px-2 py-1'}, 'Name'), el('th', {className:'text-left px-2 py-1'}, 'Hours today'))
                     ),
-                    el('tbody', null, ...todayTotals.map(t=> el('tr', {key:t.name, className:'border-t'},
-                      el('td', {className:'px-2 py-1'}, t.name),
-                      el('td', {className:'px-2 py-1'}, t.hours.toFixed(2))
-                    )))
+                    el('tbody', null,
+                      ...todayTotals.map(t=> el('tr', {key:t.name, className:'border-t'},
+                        el('td', {className:'px-2 py-1'}, t.name),
+                        el('td', {className:'px-2 py-1'}, t.hours.toFixed(2))
+                      ))
+                    )
                 )
               )
             )
           )
         ),
-        // Records table
         el('section', {className:'bg-white rounded-2xl shadow-sm border p-4 lg:col-span-3'},
           el('h3', {className:'text-base font-semibold mb-2 select-none'}, 'Recent Activity'),
           el('div', {className:'overflow-auto border rounded-2xl'},
@@ -377,7 +528,7 @@
                   el('td', {className:'px-3 py-2'}, el('span', {className:`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${r.action==='IN'?'bg-emerald-100 text-emerald-700':'bg-slate-200 text-slate-800'}`}, r.action)),
                   el('td', {className:'px-3 py-2'}, admin.enabled && el('button', {onClick:()=>saveEdit(r.id), className:'rounded-xl border px-2 py-1 text-xs'}, 'Edit'))
                 )),
-                records.length===0 && el('tr', null, el('td', {className:'px-3 py-4 text-slate-500', colSpan:4}, 'No records yet. Select a staff member and tap Sign In / Sign Out.'))
+                records.length===0 and el('tr', None, el('td', {className:'px-3 py-4 text-slate-500', colSpan:4}, 'No records yet. Select a staff member and tap Sign In / Sign Out.'))
               )
             )
           )

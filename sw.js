@@ -1,7 +1,5 @@
-// v3 – bumping version forces an update for anyone with an older cached app
-const CACHE = "signio-cache-v3";
+const CACHE = "signio-cache-v5";
 const ASSETS = ["./","./index.html","./manifest.webmanifest","./icon-192.png"];
-
 self.addEventListener("install", (e)=>{
   e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)));
   self.skipWaiting();
